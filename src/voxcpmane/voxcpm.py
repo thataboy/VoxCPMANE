@@ -628,7 +628,7 @@ class VoxCPMModelANE:
         inference_timesteps: int = 10,
         cfg_value: float = 2.0,
         retry_badcase: bool = False,
-        retry_badcase_max_times: int = 3,
+        retry_badcase_max_times: int = 1,
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
     ) -> Generator[np.ndarray, None, None]:
@@ -765,7 +765,7 @@ class VoxCPMModelANE:
         inference_timesteps: int = 10,
         cfg_value: float = 2.0,
         retry_badcase: bool = False,
-        retry_badcase_max_times: int = 3,
+        retry_badcase_max_times: int = 1,
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
     ) -> Generator[
@@ -1546,7 +1546,7 @@ class VoxCPMANE:
         denoise: bool = False,
         # retry_badcase : bool = True,
         retry_badcase: bool = False,
-        retry_badcase_max_times: int = 3,
+        retry_badcase_max_times: int = 1,
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
     ) -> Generator[np.ndarray, None, None]:

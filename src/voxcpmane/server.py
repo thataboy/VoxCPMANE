@@ -31,6 +31,8 @@ import asyncio
 from dataclasses import dataclass
 import argparse
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 try:
     from pydub import AudioSegment
 
@@ -43,12 +45,13 @@ except ImportError:
 REPO_ID = "seba/VoxCPM-ANE"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
+CUSTOM_VOICE_DIR = "./voices"
 
 try:
     lm_length = 8
     print(f"🚀 Downloading/loading model files from Hugging Face Hub repo: {REPO_ID}")
     MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
-    VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
+    VOICE_CACHE_DIR = './npy'  # os.path.join(MODEL_PATH_PREFIX, "caches")
 
     locdit_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "locdit_f16.mlmodelc")
     projections_mlmodel_path = os.path.join(
@@ -135,6 +138,12 @@ try:
 except Exception as e:
     print(f"❌ An unexpected error occurred during model setup: {e}")
     raise
+
+
+def _elog(prefix, t0, msg):
+    # elapsed since t0 in ms
+    dt = (time.perf_counter() - t0) * 1000.0
+    print(f"[+{dt:8.2f} ms] {prefix}: {msg}", flush=True)
 
 
 @dataclass
@@ -255,8 +264,14 @@ def load_voice_cache(voice_name: str):
             status_code=404,
             detail=f"Voice '{voice_name}' not found. Available: {load_available_voices()}",
         )
+    prompt_path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.txt")
+    if os.path.exists(prompt_path):
+        with open(prompt_path, 'r') as file:
+            prompt_text = file.read()
+    else:
+        prompt_text = None
     try:
-        return np.load(cache_path)
+        return [np.load(cache_path), prompt_text]
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to load voice '{voice_name}': {e}"
@@ -301,8 +316,8 @@ def generate_audio_chunks(
     audio = None
 
     if voice is not None:
-        audio_cache = load_voice_cache(voice)
-        text = CACHED_VOICE_TEXT + " " + text_to_generate
+        [audio_cache, prompt_text] = load_voice_cache(voice)
+        text = (prompt_text or CACHED_VOICE_TEXT) + " " + text_to_generate
     else:
         if prompt_wav_path and prompt_wav_path.strip():
             if not os.path.exists(prompt_wav_path):
@@ -327,7 +342,8 @@ def generate_audio_chunks(
     text = text.replace("\n", " ").strip()
     text = re.sub(r"\s+", " ", text)
     text_token = np.array(
-        model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
+        model.tts_model.text_tokenizer(text),
+        # model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
         dtype=np.int32,
     )[None, :]
 
@@ -371,8 +387,62 @@ def generate_audio_chunks(
         cancellation_event.set()
 
 
+def process_voices():
+    """
+    Look for <voice-name>.wav files in CUSTOM_VOICE_DIR and convert them to .npy
+    using any corresponding <voice-name>.txt as prompt text if it exists;
+          otherwise fallback to CACHED_PROMPT_TEXT
+    """
+    import glob
+    wav_pattern = os.path.join(CUSTOM_VOICE_DIR, '*.wav')
+    wav_files = glob.glob(wav_pattern)
+    if len(wav_files) == 0:
+        return
+    processed_path = os.path.join(CUSTOM_VOICE_DIR, 'processed')
+
+    from einops import rearrange
+    from voxcpm import VoxCPM
+    from datetime import datetime
+    import shutil
+    model = VoxCPM.from_pretrained("openbmb/VoxCPM-0.5B")
+
+    for wav_file in wav_files:
+        file_name = os.path.basename(wav_file)
+        voice_name = os.path.splitext(file_name)[0]
+        print(f"Processing voice: {voice_name}")
+        txt_path = os.path.join(CUSTOM_VOICE_DIR, f"{voice_name}.txt")
+        if os.path.exists(txt_path):
+            with open(txt_path, 'r') as file:
+                prompt_text = file.read()
+        else:
+            prompt_text = CACHED_VOICE_TEXT
+
+        try:
+            cache_data = model.tts_model.build_prompt_cache(prompt_text, wav_file)
+            audio_feat = rearrange(cache_data['audio_feat'], 't p d -> 1 d p t')
+            np.save(os.path.join(VOICE_CACHE_DIR, voice_name), audio_feat)
+        except Exception as e:
+            print(f"Error converting {voice_name}: {e}")
+            continue
+
+        shutil.copy(wav_file, VOICE_CACHE_DIR)
+        if os.path.exists(txt_path):
+            shutil.copy(txt_path, VOICE_CACHE_DIR)
+
+        # rename old processed wav to avoid collision
+        processed_wav = os.path.join(processed_path, file_name)
+        if os.path.exists(processed_wav):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = os.path.join(processed_path, f"{voice_name}.{timestamp}.wav")
+            os.rename(processed_wav, dest)
+
+        # move wav to processed folder
+        shutil.move(wav_file, processed_path)
+
+
 @app.on_event("startup")
 async def startup_event():
+    process_voices()
     worker_thread = threading.Thread(target=generation_worker, daemon=True)
     worker_thread.start()
 
@@ -410,6 +480,8 @@ async def poll_queue_for_chunks(
 
 @app.post("/v1/audio/speech")
 async def create_speech(request: SpeechRequest):
+
+    t0 = time.perf_counter()
     audio_format = request.response_format.lower()
 
     # Fast path: Use soundfile for WAV and FLAC
@@ -438,6 +510,7 @@ async def create_speech(request: SpeechRequest):
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
+    print(f"➡️{request.input}⬅️")
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
     try:
@@ -520,6 +593,7 @@ async def create_speech(request: SpeechRequest):
             )
 
     buffer.seek(0)
+    _elog("speech", t0, f"done {len(request.input)}")
     return Response(content=buffer.getvalue(), media_type=media_type)
 
 
