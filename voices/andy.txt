@@ -1,0 +1,1 @@
+Hey there! After months of intensive development, Fish Speech 1.5 has just launched with major improvements to expressiveness, stability, and cross-language capabilities.

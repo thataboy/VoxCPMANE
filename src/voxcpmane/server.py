@@ -44,7 +44,14 @@ except ImportError:
 REPO_ID = "seba/VoxCPM1.5-ANE"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
-CUSTOM_VOICE_CACHE_DIR = os.path.expanduser("~/.cache/ane_tts")
+CUSTOM_VOICE_CACHE_DIR = "./npy" # os.path.expanduser("~/.cache/ane_tts")
+
+
+def _elog(prefix, t0, msg):
+    # elapsed since t0 in ms
+    dt = (time.perf_counter() - t0) * 1000.0
+    print(f"[+{dt:8.2f} ms] {prefix}: {msg}", flush=True)
+
 
 try:
     lm_length = 8
@@ -82,7 +89,7 @@ try:
         base_lm_embed_tokens_path,
         base_lm_mf_path,
         residual_lm_mf_path,
-        VOICE_CACHE_DIR,
+        # VOICE_CACHE_DIR,
     ]
 
     missing_files = [f for f in required_files if not os.path.exists(f)]
@@ -116,7 +123,7 @@ try:
     from .voxcpm import VoxCPMANE
 
     model = VoxCPMANE(
-        "openbmb/VoxCPM-0.5B",
+        "openbmb/VoxCPM1.5",
         base_lm_mf_path,
         residual_lm_mf_path,
         fsq_mlmodel,
@@ -254,10 +261,10 @@ def load_available_voices():
     voices = set()
 
     # Default cache
-    if os.path.exists(VOICE_CACHE_DIR):
-        for file in os.listdir(VOICE_CACHE_DIR):
-            if file.endswith(".npy"):
-                voices.add(file[:-4])
+    # if os.path.exists(VOICE_CACHE_DIR):
+    #     for file in os.listdir(VOICE_CACHE_DIR):
+    #         if file.endswith(".npy"):
+    #             voices.add(file[:-4])
 
     # Custom cache
     if os.path.exists(CUSTOM_VOICE_CACHE_DIR):
@@ -269,6 +276,7 @@ def load_available_voices():
 
 
 def is_default_voice(voice_name: str) -> bool:
+    return False
     path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
     return os.path.exists(path)
 
@@ -294,9 +302,9 @@ def get_voice_prompt_text(voice_name: str) -> str:
 def load_voice_cache(voice_name: str):
 
     # Check default first
-    cache_path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
-    if os.path.exists(cache_path):
-        return np.load(cache_path)
+    # cache_path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
+    # if os.path.exists(cache_path):
+    #     return np.load(cache_path)
 
     # Check custom
     cache_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.npy")
@@ -342,25 +350,25 @@ def normalize_apple_punctuation(text):
         '\u201d': '"',  # ” (right double quote)
         '\u2018': "'",  # ‘ (left single quote)
         '\u2019': "'",  # ’ (right single quote)
-        
+
         # Dashes
         '\u2013': '-',  # – (en dash)
         '\u2014': '-',  # — (em dash)
-        
+
         # Ellipsis
         '\u2026': '...',  # … (horizontal ellipsis)
-        
+
         # Bullets and other symbols
         '\u2022': '*',  # • (bullet)
         '\u00a0': ' ',  # (non-breaking space)
-        
+
         # Other common smart punctuation
         '\u201a': ',',  # ‚ (single low-9 quotation mark)
         '\u201e': '"',  # „ (double low-9 quotation mark)
         '\u2039': '<',  # ‹ (single left-pointing angle quotation)
         '\u203a': '>',  # › (single right-pointing angle quotation)
     })
-    
+
     return text.translate(translation_table)
 
 def generate_audio_chunks(
@@ -609,6 +617,7 @@ async def poll_queue_for_chunks(
 
 @app.post("/v1/audio/speech")
 async def create_speech(request: SpeechRequest):
+    t0 = time.perf_counter()
     audio_format = request.response_format.lower()
 
     # Fast path: Use soundfile for WAV and FLAC
@@ -634,6 +643,8 @@ async def create_speech(request: SpeechRequest):
     global JOB_COUNTER
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
+
+    print(f"{request.voice}➡️{request.input}⬅️")
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
@@ -719,6 +730,7 @@ async def create_speech(request: SpeechRequest):
             )
 
     buffer.seek(0)
+    _elog("speech", t0, f"done {len(request.input)}")
     return Response(content=buffer.getvalue(), media_type=media_type)
 
 
@@ -970,6 +982,12 @@ async def get_available_voices():
         raise HTTPException(status_code=500, detail=f"Failed to load voices: {e}")
 
 
+@app.get("/voices/refresh")
+async def refresh_voices():
+    scan_and_compile_audio_cache()
+    return {'ok': True}
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -984,6 +1002,7 @@ async def health_check():
 
 
 def main():
+    global CUSTOM_VOICE_CACHE_DIR
     parser = argparse.ArgumentParser(description="OpenAI-compatible TTS Server")
     parser.add_argument(
         "--port",
@@ -1001,12 +1020,11 @@ def main():
     parser.add_argument(
         "--cache-dir",
         type=str,
-        default=os.path.expanduser("~/.cache/ane_tts"),
+        default=CUSTOM_VOICE_CACHE_DIR,
         help="Directory for custom voice caches",
     )
     args = parser.parse_args()
 
-    global CUSTOM_VOICE_CACHE_DIR
     CUSTOM_VOICE_CACHE_DIR = args.cache_dir
     if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
         os.makedirs(CUSTOM_VOICE_CACHE_DIR, exist_ok=True)
