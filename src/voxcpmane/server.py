@@ -601,9 +601,19 @@ async def get_frontend():
 
 
 async def poll_queue_for_chunks(
-    output_queue: queue.Queue, poll_interval: float = 0.005
+    output_queue: queue.Queue,
+    poll_interval: float = 0.005,
+    # New parameters for timeout:
+    generation_start_time: float = 0.0,
+    dynamic_timeout: float = float('inf'),
 ):
     while True:
+        # Check overall time *before* attempting to get a chunk
+        elapsed = time.time() - generation_start_time
+        if elapsed > dynamic_timeout:
+            # We must break the generator and signal an exception
+            raise TimeoutError(f"Generation timed out after {elapsed:.2f}s (Limit: {dynamic_timeout:.2f}s)")
+
         try:
             item = output_queue.get_nowait()
 
@@ -647,7 +657,13 @@ async def create_speech(request: SpeechRequest):
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
 
-    print(f"{request.voice}➡️{request.input}⬅️")
+    INPUT_LENGTH = len(request.input)
+    TIMEOUT_PER_CHAR_MS = 60.0
+    MIN_TIMEOUT_SECONDS = 12.5
+    dynamic_timeout = max(
+        MIN_TIMEOUT_SECONDS, (TIMEOUT_PER_CHAR_MS * INPUT_LENGTH) / 1000.0
+    )
+    print(f"{request.voice}➡️{request.input}⬅️ (Timeout: {dynamic_timeout:.2f}s)")
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
@@ -660,10 +676,19 @@ async def create_speech(request: SpeechRequest):
             status_code=429, detail="Server is busy processing another request"
         )
 
+    generation_start_time = time.time()
     all_chunks = []
+
     try:
-        async for chunk in poll_queue_for_chunks(output_queue):
+        async for chunk in poll_queue_for_chunks(
+            output_queue,
+            generation_start_time=generation_start_time,
+            dynamic_timeout=dynamic_timeout
+        ):
             all_chunks.append(chunk)
+    except TimeoutError as e:
+        print(f"⚠️  Job {job_id}: {str(e)} Returning {len(all_chunks)} chunks.")
+        cancel_event.set()
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Audio generation failed: {str(e)}"
@@ -673,14 +698,14 @@ async def create_speech(request: SpeechRequest):
 
     if not all_chunks:
         raise HTTPException(
-            status_code=500, detail="Audio generation failed (no chunks produced)"
+            status_code=505, detail="Audio generation failed (no chunks produced)"
         )
 
     try:
         full_audio_float32 = np.concatenate(all_chunks)
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Failed to concatenate audio chunks: {str(e)}"
+            status_code=506, detail=f"Failed to concatenate audio chunks: {str(e)}"
         )
 
     audio_format = request.response_format.lower()
@@ -742,6 +767,8 @@ async def stream_speech(request: SpeechRequest):
     global JOB_COUNTER
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
+
+    print(f"{request.voice}➡️{request.input}⬅️")
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
