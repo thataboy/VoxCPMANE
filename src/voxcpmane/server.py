@@ -659,7 +659,7 @@ async def create_speech(request: SpeechRequest):
 
     INPUT_LENGTH = len(request.input)
     TIMEOUT_PER_CHAR_MS = 60.0
-    MIN_TIMEOUT_SECONDS = 12.5
+    MIN_TIMEOUT_SECONDS = 10.5
     dynamic_timeout = max(
         MIN_TIMEOUT_SECONDS, (TIMEOUT_PER_CHAR_MS * INPUT_LENGTH) / 1000.0
     )
