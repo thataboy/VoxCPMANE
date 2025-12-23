@@ -236,7 +236,7 @@ app.add_middleware(
 
 
 class SpeechRequest(BaseModel):
-    model: str = "voxcpm-0.5b"
+    model: str = "voxcpm1.5"
     input: str
     voice: Optional[str] = None
     response_format: Optional[str] = "wav"
@@ -659,11 +659,11 @@ async def create_speech(request: SpeechRequest):
 
     INPUT_LENGTH = len(request.input)
     TIMEOUT_PER_CHAR_MS = 60.0
-    MIN_TIMEOUT_SECONDS = 10.5
+    MIN_TIMEOUT_SECONDS = 10.0
     dynamic_timeout = max(
         MIN_TIMEOUT_SECONDS, (TIMEOUT_PER_CHAR_MS * INPUT_LENGTH) / 1000.0
     )
-    print(f"{request.voice}➡️{request.input}⬅️ (Timeout: {dynamic_timeout:.2f}s)")
+    print(f"{request.voice} {request.inference_timesteps}➡️{request.input}⬅️ (Timeout: {dynamic_timeout:.2f}s)")
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
@@ -1035,7 +1035,7 @@ async def health_check():
         "is_processing": is_processing,
         "current_job_id": CURRENT_JOB.job_id if is_processing else None,
         "queue_pending": not GENERATION_QUEUE.empty(),
-        "model": "voxcpm-0.5b",
+        "model": "voxcpm1.5",
     }
 
 
