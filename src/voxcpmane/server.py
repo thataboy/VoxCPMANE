@@ -603,17 +603,13 @@ async def get_frontend():
 async def poll_queue_for_chunks(
     output_queue: queue.Queue,
     poll_interval: float = 0.005,
-    # New parameters for timeout:
-    generation_start_time: float = 0.0,
-    dynamic_timeout: float = float('inf'),
+    silence_threshold: float = 0.001,  # Threshold for "near silence"
+    max_silent_chunks: int = 1         # Exit after ~5 silent chunks in a row
 ):
-    while True:
-        # Check overall time *before* attempting to get a chunk
-        elapsed = time.time() - generation_start_time
-        if elapsed > dynamic_timeout:
-            # We must break the generator and signal an exception
-            raise TimeoutError(f"Generation timed out after {elapsed:.2f}s (Limit: {dynamic_timeout:.2f}s)")
+    chunk_count = 0
+    silent_chunk_count = 0
 
+    while True:
         try:
             item = output_queue.get_nowait()
 
@@ -621,8 +617,24 @@ async def poll_queue_for_chunks(
                 break
             elif isinstance(item, Exception):
                 raise item
+
+            # Silence Detection
+            peak = np.abs(item).max()
+            if peak < silence_threshold:
+                silent_chunk_count += 1
             else:
-                yield item
+                # Reset counter if we hear actual audio
+                silent_chunk_count = 0
+                chunk_count += 1
+
+            yield item
+
+            # Early exit if the AI is just outputting "dead air"
+            if silent_chunk_count >= max_silent_chunks:
+                if chunk_count == 0:
+                    continue
+                print(f"🤫 Silence detected. Early exit.")
+                break
 
         except queue.Empty:
             await asyncio.sleep(poll_interval)
@@ -658,7 +670,7 @@ async def create_speech(request: SpeechRequest):
     job_id = JOB_COUNTER
 
     INPUT_LENGTH = len(request.input)
-    TIMEOUT_PER_CHAR_MS = 60.0
+    TIMEOUT_PER_CHAR_MS = 65.0
     MIN_TIMEOUT_SECONDS = 10.0
     dynamic_timeout = max(
         MIN_TIMEOUT_SECONDS, (TIMEOUT_PER_CHAR_MS * INPUT_LENGTH) / 1000.0
@@ -676,19 +688,11 @@ async def create_speech(request: SpeechRequest):
             status_code=429, detail="Server is busy processing another request"
         )
 
-    generation_start_time = time.time()
     all_chunks = []
 
     try:
-        async for chunk in poll_queue_for_chunks(
-            output_queue,
-            generation_start_time=generation_start_time,
-            dynamic_timeout=dynamic_timeout
-        ):
+        async for chunk in poll_queue_for_chunks(output_queue):
             all_chunks.append(chunk)
-    except TimeoutError as e:
-        print(f"⚠️  Job {job_id}: {str(e)} Returning {len(all_chunks)} chunks.")
-        cancel_event.set()
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Audio generation failed: {str(e)}"
@@ -696,10 +700,10 @@ async def create_speech(request: SpeechRequest):
     finally:
         cancel_event.set()
 
-    if not all_chunks:
-        raise HTTPException(
-            status_code=505, detail="Audio generation failed (no chunks produced)"
-        )
+    # if not all_chunks:
+    #     raise HTTPException(
+    #         status_code=505, detail="Audio generation failed (no chunks produced)"
+    #     )
 
     try:
         full_audio_float32 = np.concatenate(all_chunks)
@@ -758,7 +762,11 @@ async def create_speech(request: SpeechRequest):
             )
 
     buffer.seek(0)
-    _elog("speech", t0, f"done {len(request.input)}")
+    total_samples = len(full_audio_float32)
+    audio_duration = total_samples / SAMPLE_RATE
+    generation_time = time.perf_counter() - t0
+    rtf = generation_time / audio_duration if audio_duration > 0 else 0
+    _elog("speech", t0, f"len={len(request.input)} dur={audio_duration:.2f}s rtf={rtf:.2f}")
     return Response(content=buffer.getvalue(), media_type=media_type)
 
 
