@@ -601,11 +601,11 @@ async def get_frontend():
 
 
 async def poll_queue_for_chunks(
-    output_queue: queue.Queue,
-    poll_interval: float = 0.005,
-    silence_threshold: float = 0.001,  # Threshold for "near silence"
-    max_silent_chunks: int = 1         # Exit after ~5 silent chunks in a row
+    output_queue: queue.Queue, poll_interval: float = 0.005
 ):
+    SILENCE_THRESHOLD = 0.001  # Threshold for silence
+    MAX_START_SILENCE = 5      # max number of silent chunks allowed at start
+    MAX_END_SILENCE = 3        # max number of silent chunks allowed at end
     chunk_count = 0
     silent_chunk_count = 0
 
@@ -618,23 +618,26 @@ async def poll_queue_for_chunks(
             elif isinstance(item, Exception):
                 raise item
 
-            # Silence Detection
+            # Silence detection
             peak = np.abs(item).max()
-            if peak < silence_threshold:
+            if peak < SILENCE_THRESHOLD:
                 silent_chunk_count += 1
             else:
                 # Reset counter if we hear actual audio
                 silent_chunk_count = 0
                 chunk_count += 1
 
-            yield item
-
-            # Early exit if the AI is just outputting "dead air"
-            if silent_chunk_count >= max_silent_chunks:
-                if chunk_count == 0:
-                    continue
-                print(f"🤫 Silence detected. Early exit.")
+            # Early exit if the engine is outputting "dead air"
+            if (chunk_count == 0 and silent_chunk_count >= MAX_START_SILENCE
+               or chunk_count > 0 and silent_chunk_count >= MAX_END_SILENCE):
+                s = "End" if chunk_count > 0 else "Start"
+                print(f"🤫 {s} silence detected. Early exit.")
                 break
+            elif chunk_count == 0 and silent_chunk_count > 0:
+                # skip start silence
+                continue
+
+            yield item
 
         except queue.Empty:
             await asyncio.sleep(poll_interval)
@@ -669,13 +672,7 @@ async def create_speech(request: SpeechRequest):
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
 
-    INPUT_LENGTH = len(request.input)
-    TIMEOUT_PER_CHAR_MS = 65.0
-    MIN_TIMEOUT_SECONDS = 10.0
-    dynamic_timeout = max(
-        MIN_TIMEOUT_SECONDS, (TIMEOUT_PER_CHAR_MS * INPUT_LENGTH) / 1000.0
-    )
-    print(f"{request.voice} {request.inference_timesteps}➡️{request.input}⬅️ (Timeout: {dynamic_timeout:.2f}s)")
+    print(f"{request.voice} {request.inference_timesteps}➡️{request.input}⬅️")
 
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
