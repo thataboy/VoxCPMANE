@@ -697,10 +697,10 @@ async def create_speech(request: SpeechRequest):
     finally:
         cancel_event.set()
 
-    # if not all_chunks:
-    #     raise HTTPException(
-    #         status_code=505, detail="Audio generation failed (no chunks produced)"
-    #     )
+    if not all_chunks:
+        raise HTTPException(
+            status_code=505, detail="Audio generation failed (no chunks produced)"
+        )
 
     try:
         full_audio_float32 = np.concatenate(all_chunks)
