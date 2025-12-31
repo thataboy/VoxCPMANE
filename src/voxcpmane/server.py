@@ -157,6 +157,7 @@ class GenerationJob:
     output_queue: queue.Queue  # Worker puts audio chunks here
     cancel_event: threading.Event  # Endpoint sets this on disconnect
     job_id: int
+    is_aborted: bool = False       # ONLY for user-initiated cancel
 
 
 # The central job queue. maxsize=1 means only one job can be
@@ -689,7 +690,14 @@ async def create_speech(request: SpeechRequest):
 
     try:
         async for chunk in poll_queue_for_chunks(output_queue):
+            if job.is_aborted:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Generation cancelled before completion."
+                )
             all_chunks.append(chunk)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Audio generation failed: {str(e)}"
@@ -934,6 +942,7 @@ async def cancel_generation():
         )
 
     try:
+        CURRENT_JOB.is_aborted = True
         CURRENT_JOB.cancel_event.set()
         return JSONResponse(
             {
