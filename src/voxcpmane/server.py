@@ -604,11 +604,12 @@ async def get_frontend():
 async def poll_queue_for_chunks(
     output_queue: queue.Queue, poll_interval: float = 0.005
 ):
-    SILENCE_THRESHOLD = 0.001  # Threshold for silence
-    MAX_START_SILENCE = 5      # max number of silent chunks allowed at start
-    MAX_END_SILENCE = 3        # max number of silent chunks allowed at end
-    chunk_count = 0
-    silent_chunk_count = 0
+    SILENCE_THRESHOLD = 0.001
+    MAX_START_SILENCE = 1.25     # Allowed silence duration in secs at the very start
+    MAX_END_SILENCE = 0.75       # Allowed silence duration in secs after audible chunks
+
+    silence_duration = 0.0
+    found_audible = False
 
     while True:
         try:
@@ -619,23 +620,26 @@ async def poll_queue_for_chunks(
             elif isinstance(item, Exception):
                 raise item
 
-            # Silence detection
+            # Calculate duration of this specific chunk
+            chunk_duration = len(item) / SAMPLE_RATE
             peak = np.abs(item).max()
-            if peak < SILENCE_THRESHOLD:
-                silent_chunk_count += 1
-            else:
-                # Reset counter if we hear actual audio
-                silent_chunk_count = 0
-                chunk_count += 1
 
-            # Early exit if the engine is outputting "dead air"
-            if (chunk_count == 0 and silent_chunk_count >= MAX_START_SILENCE
-               or chunk_count > 0 and silent_chunk_count >= MAX_END_SILENCE):
-                s = "End" if chunk_count > 0 else "Start"
-                print(f"🤫 {s} silence detected. Early exit.")
-                break
-            elif chunk_count == 0 and silent_chunk_count > 0:
-                # skip start silence
+            if peak < SILENCE_THRESHOLD:
+                silence_duration += chunk_duration
+            else:
+                # Reset silence timer because we found audible chunk
+                silence_duration = 0.0
+                found_audible = True
+
+            if found_audible:
+                if silence_duration > MAX_END_SILENCE:
+                    print(f"🤫 End silence detected ({silence_duration:.2f}s). Hallucination guard triggered.")
+                    break
+            else:
+                if silence_duration > MAX_START_SILENCE:
+                    print(f"🤫 Start silence exceeded {MAX_START_SILENCE}ms. Early exit.")
+                    break
+                # Skip initial silent chunks
                 continue
 
             yield item
