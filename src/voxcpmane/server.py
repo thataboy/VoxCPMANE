@@ -19,7 +19,6 @@ from fastapi.responses import (
     HTMLResponse,
     Response,
 )
-from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 import soundfile
 import soxr
@@ -30,7 +29,6 @@ import aiofiles
 from huggingface_hub import snapshot_download
 import asyncio
 from dataclasses import dataclass
-import argparse
 import ftfy
 
 try:
@@ -45,13 +43,7 @@ except ImportError:
 REPO_ID = "seba/VoxCPM1.5-ANE"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
-CUSTOM_VOICE_CACHE_DIR = "./npy" # os.path.expanduser("~/.cache/ane_tts")
-
-
-def _elog(prefix, t0, msg):
-    # elapsed since t0 in ms
-    dt = (time.perf_counter() - t0) * 1000.0
-    print(f"[+{dt:8.2f} ms] {prefix}: {msg}", flush=True)
+CUSTOM_VOICE_CACHE_DIR = "./npy"  # os.path.expanduser("~/.cache/ane_tts")
 
 
 try:
@@ -226,14 +218,6 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
 
 APP_DIR = pathlib.Path(__file__).parent
 FRONTEND_FILE = APP_DIR / "frontend" / "index.html"
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class SpeechRequest(BaseModel):
@@ -605,8 +589,9 @@ async def poll_queue_for_chunks(
     output_queue: queue.Queue, poll_interval: float = 0.005
 ):
     SILENCE_THRESHOLD = 0.001
-    MAX_START_SILENCE = 1.25     # Allowed silence duration in secs at the very start
-    MAX_END_SILENCE = 0.75       # Allowed silence duration in secs after audible chunks
+    MAX_START_SILENCE = 2.0     # Allowed silence duration in secs at the very start
+    MAX_END_SILENCE = 2.0       # Allowed silence duration in secs after audible chunks
+    TRIM_END_SILENCE = 0.5      # end silence beyond this will be trimmed
 
     silence_duration = 0.0
     found_audible = False
@@ -635,6 +620,8 @@ async def poll_queue_for_chunks(
                 if silence_duration > MAX_END_SILENCE:
                     print(f"🤫 End silence detected ({silence_duration:.2f}s). Hallucination guard triggered.")
                     break
+                if silence_duration > TRIM_END_SILENCE:
+                    continue
             else:
                 if silence_duration > MAX_START_SILENCE:
                     print(f"🤫 Start silence exceeded {MAX_START_SILENCE}ms. Early exit.")
@@ -772,10 +759,10 @@ async def create_speech(request: SpeechRequest):
 
     buffer.seek(0)
     total_samples = len(full_audio_float32)
-    audio_duration = total_samples / SAMPLE_RATE
-    generation_time = time.perf_counter() - t0
-    rtf = generation_time / audio_duration if audio_duration > 0 else 0
-    _elog("speech", t0, f"len={len(request.input)} dur={audio_duration:.2f}s rtf={rtf:.2f}")
+    duration = total_samples / SAMPLE_RATE
+    elapsed = time.perf_counter() - t0
+    rtf = elapsed / duration if duration > 0 else 0
+    print(f"[{elapsed:.3f}s] len={len(request.input)} dur={duration:.2f}s rtf={rtf:.4f}")
     return Response(content=buffer.getvalue(), media_type=media_type)
 
 
@@ -1058,39 +1045,14 @@ async def health_check():
 
 
 def main():
-    global CUSTOM_VOICE_CACHE_DIR
-    parser = argparse.ArgumentParser(description="OpenAI-compatible TTS Server")
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8000,
-        help="Port to run the server on (default: 8000)",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Host to bind the server to (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=CUSTOM_VOICE_CACHE_DIR,
-        help="Directory for custom voice caches",
-    )
-    args = parser.parse_args()
-
-    CUSTOM_VOICE_CACHE_DIR = args.cache_dir
     if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
         os.makedirs(CUSTOM_VOICE_CACHE_DIR, exist_ok=True)
 
     print("🚀 Starting server...")
-    print(f"   Access the frontend playground at: http://{args.host}:{args.port}")
     print(f"   Custom cache dir: {CUSTOM_VOICE_CACHE_DIR}")
     print(f"   Available voices: {len(load_available_voices())}")
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=9000, log_level="info")
 
 
 if __name__ == "__main__":
